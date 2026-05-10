@@ -338,12 +338,12 @@
 		if ("server" === message.type && "peer-count" === message.event) {
 			updatePeerCount(message.peers || 0);
 			if (state.isHosting && message.peers > 0) {
-				setStatus("Friend connected. Open the Test runway on both PCs.", "ok");
+				setStatus("Friend connected. Open the same track on both PCs.", "ok");
 			}
 			return;
 		}
 		if ("hello" === message.type) {
-			setStatus("Friend connected. Open the Test runway on both PCs.", "ok");
+			setStatus("Friend connected. Open the same track on both PCs.", "ok");
 			return;
 		}
 		if ("state" === message.type && message.state && state.hooks && "function" === typeof state.hooks.pushRemoteState) {
@@ -384,7 +384,7 @@
 		socket.onopen = () => {
 			state.lastSnapshotAt = 0;
 			send({ type: "hello", role: state.isHosting ? "host" : "guest" });
-			setStatus(state.isHosting ? "Host ready. Share one of the host URLs below, then open the Test runway." : "Connected. Open the Test runway on both PCs.", "ok");
+			setStatus(state.isHosting ? "Host ready. Share one of the host URLs below, then open the same track." : "Connected. Open the same track on both PCs.", "ok");
 			updateUi();
 		};
 
@@ -591,7 +591,7 @@
 <button id="multiplayer-toggle" type="button">Hide Online</button>
 <section id="multiplayer-panel">
 	<h2>Online Runway</h2>
-	<p>Works on the Test runway. Host a session, share the ws:// address, and have both players open the Test button from the main menu.</p>
+	<p>Host a session, share the ws:// address, and have both players open the same track.</p>
 	<div class="row">
 		<input id="multiplayer-port" type="number" min="1024" max="65535" value="32323" placeholder="Port">
 		<button id="multiplayer-host" type="button">Start Host</button>
