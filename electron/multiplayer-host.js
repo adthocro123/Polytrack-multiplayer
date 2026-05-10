@@ -6,6 +6,8 @@ class MultiplayerHost {
 		this.server = null;
 		this.port = null;
 		this.clients = new Set();
+		this.clientIds = new Map();
+		this.nextClientId = 1;
 	}
 
 	getInfo() {
@@ -70,6 +72,8 @@ class MultiplayerHost {
 					socket._socket.setNoDelay(true);
 				}
 				this.clients.add(socket);
+				this.clientIds.set(socket, `host-${this.nextClientId++}`);
+				this.send(socket, { type: "server", event: "welcome", serverPeerId: this.clientIds.get(socket), serverTime: Date.now() });
 				this.broadcast({ type: "server", event: "peer-count", peers: this.clients.size - 1 });
 
 				socket.on("message", (buffer) => {
@@ -78,7 +82,10 @@ class MultiplayerHost {
 				});
 
 				socket.on("close", () => {
+					const serverPeerId = this.clientIds.get(socket);
 					this.clients.delete(socket);
+					this.clientIds.delete(socket);
+					this.broadcast({ type: "server", event: "peer-left", serverPeerId });
 					this.broadcast({ type: "server", event: "peer-count", peers: Math.max(0, this.clients.size - 1) });
 				});
 
@@ -87,6 +94,12 @@ class MultiplayerHost {
 				});
 			});
 		});
+	}
+
+	send(socket, message) {
+		if (1 === socket.readyState) {
+			socket.send("string" === typeof message ? message : JSON.stringify(message));
+		}
 	}
 
 	broadcast(message) {
@@ -99,11 +112,44 @@ class MultiplayerHost {
 	}
 
 	relay(sender, payload) {
+		const parsed = this.parseMessage(payload);
+		if (parsed && "race" === parsed.type && "start-request" === parsed.event) {
+			const now = Date.now();
+			this.broadcast({
+				type: "race",
+				event: "countdown",
+				raceId: parsed.raceId || `${now}`,
+				countdownMs: Math.max(1000, Math.min(10000, Number(parsed.countdownMs) || 4000)),
+				serverTime: now,
+				startAt: now + Math.max(1000, Math.min(10000, Number(parsed.countdownMs) || 4000)),
+			});
+			return;
+		}
+
+		if (parsed && "race" === parsed.type && "rematch-request" === parsed.event) {
+			this.broadcast({
+				type: "race",
+				event: "rematch",
+				raceId: parsed.raceId || `${Date.now()}`,
+				serverTime: Date.now(),
+			});
+			return;
+		}
+
 		this.clients.forEach((client) => {
 			if (client !== sender && 1 === client.readyState) {
 				client.send(payload);
 			}
 		});
+	}
+
+	parseMessage(payload) {
+		try {
+			const parsed = JSON.parse(payload);
+			return parsed && "object" === typeof parsed ? parsed : null;
+		} catch (_error) {
+			return null;
+		}
 	}
 
 	async stop() {
