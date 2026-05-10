@@ -396,6 +396,7 @@
 			finishAt: null,
 			crashes: 0,
 			restarts: 0,
+			lastCrashAt: 0,
 		};
 		Object.assign(existing, defaults);
 		state.players.set(playerId, existing);
@@ -553,6 +554,9 @@
 			player.totalFrames = 0;
 			player.checkpoint = 0;
 			player.speedKmh = 0;
+			player.crashes = 0;
+			player.restarts = 0;
+			player.lastCrashAt = 0;
 		});
 		setRacePaused(false);
 		if (state.dom.countdown) {
@@ -637,7 +641,7 @@
 		state.dom.results.hidden = false;
 		state.dom.resultsList.innerHTML = finished.map((player, index) => `<div class="multiplayer-result-row${player.isSelf ? " self" : ""}">
 			<span>${index + 1}. ${escapeHtml(player.name || "Friend")}</span>
-			<strong>${formatFrames(player.finishFrames || player.totalFrames)}</strong>
+			<strong>${formatFrames(player.finishFrames || player.totalFrames)} | C${player.crashes || 0} R${player.restarts || 0}</strong>
 		</div>`).join("");
 		updateUi();
 	};
@@ -646,15 +650,30 @@
 		if (!carState) {
 			return;
 		}
+		const previous = state.players.get(state.playerId);
+		const frames = carState.frames || 0;
+		let crashes = previous ? previous.crashes || 0 : 0;
+		let restarts = previous ? previous.restarts || 0 : 0;
+		let lastCrashAt = previous ? previous.lastCrashAt || 0 : 0;
+		if (previous && previous.timeFrames > 1000 && frames < previous.timeFrames - 500 && "idle" !== state.race.phase) {
+			restarts++;
+		}
+		if (Array.isArray(carState.collisionImpulses) && carState.collisionImpulses.length > 0 && getServerNow() - lastCrashAt > 1200) {
+			crashes++;
+			lastCrashAt = getServerNow();
+		}
 		const player = ensurePlayer(state.playerId, {
 			name: state.playerName,
 			isSelf: true,
 			ready: state.localReady,
 			checkpoint: carState.nextCheckpointIndex || 0,
-			timeFrames: carState.frames || 0,
+			timeFrames: frames,
 			totalFrames: carState.totalFrames || 0,
 			speedKmh: carState.speedKmh || 0,
 			hasFinished: !!carState.hasFinished,
+			crashes,
+			restarts,
+			lastCrashAt,
 		});
 		if (carState.hasFinished && !state.localFinishSent && state.race.raceId) {
 			state.localFinishSent = true;
@@ -667,6 +686,8 @@
 				raceId: state.race.raceId,
 				finishFrames: player.finishFrames,
 				finishAt: player.finishAt,
+				crashes: player.crashes,
+				restarts: player.restarts,
 			});
 			setStatus("Finished. Waiting for results.", "ok");
 			renderLeaderboard();
@@ -677,16 +698,31 @@
 		if (!playerId || playerId === state.playerId || !carState) {
 			return;
 		}
+		const previous = state.players.get(playerId);
+		const frames = carState.frames || 0;
+		let crashes = previous ? previous.crashes || 0 : 0;
+		let restarts = previous ? previous.restarts || 0 : 0;
+		let lastCrashAt = previous ? previous.lastCrashAt || 0 : 0;
+		if (previous && previous.timeFrames > 1000 && frames < previous.timeFrames - 500 && "idle" !== state.race.phase) {
+			restarts++;
+		}
+		if (Array.isArray(carState.collisionImpulses) && carState.collisionImpulses.length > 0 && getServerNow() - lastCrashAt > 1200) {
+			crashes++;
+			lastCrashAt = getServerNow();
+		}
 		ensurePlayer(playerId, {
 			name: name || (state.players.get(playerId) && state.players.get(playerId).name) || "Friend",
 			isSelf: false,
 			connected: true,
 			checkpoint: carState.nextCheckpointIndex || 0,
-			timeFrames: carState.frames || 0,
+			timeFrames: frames,
 			totalFrames: carState.totalFrames || 0,
 			speedKmh: carState.speedKmh || 0,
 			hasFinished: !!carState.hasFinished,
 			finishFrames: carState.hasFinished ? carState.totalFrames || carState.frames : (state.players.get(playerId) && state.players.get(playerId).finishFrames) || null,
+			crashes,
+			restarts,
+			lastCrashAt,
 		});
 		renderLeaderboard();
 	};
@@ -821,6 +857,8 @@
 				hasFinished: true,
 				finishFrames: message.finishFrames,
 				finishAt: message.finishAt,
+				crashes: message.crashes || 0,
+				restarts: message.restarts || 0,
 			});
 			renderLeaderboard();
 			return;
