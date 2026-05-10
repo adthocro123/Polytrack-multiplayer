@@ -1,0 +1,1 @@
+const{contextBridge,ipcRenderer}=require("electron");contextBridge.exposeInMainWorld("electron",{quit:()=>ipcRenderer.send("quit"),newWindow:()=>ipcRenderer.send("window:new"),multiplayer:{startHost:e=>ipcRenderer.invoke("multiplayer:startHost",e),stopHost:()=>ipcRenderer.invoke("multiplayer:stopHost"),getHostInfo:()=>ipcRenderer.invoke("multiplayer:getHostInfo")}});
