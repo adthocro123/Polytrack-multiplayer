@@ -35,7 +35,6 @@
     "build-mac": "node electron/build.js --platform=darwin --arch=arm64",
     "build-mac-arm64": "node electron/build.js --platform=darwin --arch=arm64",
     "build-mac-intel": "node electron/build.js --platform=darwin --arch=x64",
-    "relay": "node server/public-relay.js",
     "package": "npm run build-electron"
   }
 }

@@ -7,65 +7,29 @@
 	const REMOTE_STALE_MS = 1500;
 	const COUNTDOWN_MS = 4000;
 	const LEADERBOARD_REFRESH_MS = 120;
-	const PING_INTERVAL_MS = 2000;
-	const GHOST_SAMPLE_INTERVAL_MS = 125;
-	const MAX_GHOST_SAMPLES = 720;
 	const PLAYER_NAME_KEY = "polytrack.multiplayer.playerName";
-	const RELAY_URL_KEY = "polytrack.multiplayer.relayUrl";
-	const AUTO_TRACK_SYNC_KEY = "polytrack.multiplayer.autoTrackSync";
-	const RACE_PRESET_KEY = "polytrack.multiplayer.racePreset";
-	const BEST_GHOST_KEY = "polytrack.multiplayer.bestGhost";
 	const ROOM_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 	const createPlayerId = () => `p-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36).slice(-4)}`;
-	const loadStoredValue = (key, fallback) => {
-		try {
-			const value = localStorage.getItem(key);
-			return null == value ? fallback : value;
-		} catch (_error) {
-			return fallback;
-		}
-	};
-	const saveStoredValue = (key, value) => {
-		try {
-			localStorage.setItem(key, value);
-		} catch (_error) {
-			// Local storage can fail in restrictive contexts; the session value still works.
-		}
-	};
 	const loadPlayerName = () => {
-		const savedName = loadStoredValue(PLAYER_NAME_KEY, "");
-		if (savedName && savedName.trim()) {
-			return savedName.trim().slice(0, 24);
+		try {
+			const savedName = localStorage.getItem(PLAYER_NAME_KEY);
+			if (savedName && savedName.trim()) {
+				return savedName.trim().slice(0, 24);
+			}
+		} catch (_error) {
+			// Ignore storage failures and fall back to a generated display name.
 		}
 		return `Player ${Math.floor(100 + 900 * Math.random())}`;
-	};
-	const loadBoolean = (key, fallback) => "true" === loadStoredValue(key, fallback ? "true" : "false");
-	const loadBestGhost = () => {
-		try {
-			const ghost = JSON.parse(loadStoredValue(BEST_GHOST_KEY, "null"));
-			return ghost && Array.isArray(ghost.samples) ? ghost : null;
-		} catch (_error) {
-			return null;
-		}
 	};
 
 	const state = {
 		hooks: null,
 		socket: null,
 		isHosting: false,
-		connectionKind: "direct",
-		pendingRelayAction: null,
-		pendingRelayCode: "",
-		roomCode: "",
-		relayUrl: loadStoredValue(RELAY_URL_KEY, "ws://127.0.0.1:8080"),
 		hostInfo: null,
 		playerId: createPlayerId(),
 		playerName: loadPlayerName(),
-		hostPlayerId: null,
-		autoTrackSync: loadBoolean(AUTO_TRACK_SYNC_KEY, true),
-		racePreset: loadStoredValue(RACE_PRESET_KEY, "nolimit"),
-		trackSync: null,
 		serverClockOffsetMs: 0,
 		lastSnapshotAt: 0,
 		remoteSamples: [],
@@ -74,19 +38,6 @@
 		players: new Map(),
 		localReady: false,
 		localFinishSent: false,
-		pingTimer: null,
-		pingSentAt: new Map(),
-		ghostSamples: [],
-		lastGhostSampleAt: 0,
-		bestGhost: loadBestGhost(),
-		ghostPlayback: null,
-		stats: {
-			topSpeedKmh: 0,
-			totalSpeedKmh: 0,
-			speedSamples: 0,
-			checkpointSplits: [],
-			lastCheckpoint: 0,
-		},
 		race: {
 			phase: "idle",
 			raceId: null,
@@ -127,25 +78,6 @@
 	};
 
 	const formatFrames = (frames) => formatRaceTime("number" === typeof frames ? frames : Number.NaN);
-	const getPresetLabel = (preset = state.racePreset) => ({
-		stock: "Normal",
-		nolimit: "F1 No Limit",
-		timetrial: "Time Trial",
-		chaos: "Chaos",
-		collision: "Collision Lite",
-	}[preset] || "F1 No Limit");
-
-	const saveLobbySettings = () => {
-		saveStoredValue(RELAY_URL_KEY, state.relayUrl);
-		saveStoredValue(AUTO_TRACK_SYNC_KEY, state.autoTrackSync ? "true" : "false");
-		saveStoredValue(RACE_PRESET_KEY, state.racePreset);
-	};
-
-	const applyRacePreset = () => {
-		if (state.hooks && "function" === typeof state.hooks.setRacePreset) {
-			state.hooks.setRacePreset(state.racePreset);
-		}
-	};
 
 	const parseIPv4 = (value) => {
 		const parts = value.split(".").map((part) => Number(part));
@@ -459,16 +391,12 @@
 			timeFrames: 0,
 			totalFrames: 0,
 			speedKmh: 0,
-			topSpeedKmh: 0,
-			avgSpeedKmh: 0,
 			hasFinished: false,
 			finishFrames: null,
 			finishAt: null,
 			crashes: 0,
 			restarts: 0,
 			lastCrashAt: 0,
-			pingMs: null,
-			ghost: null,
 		};
 		Object.assign(existing, defaults);
 		state.players.set(playerId, existing);
@@ -478,13 +406,17 @@
 	const savePlayerName = () => {
 		state.playerName = (state.dom.playerName && state.dom.playerName.value.trim() ? state.dom.playerName.value.trim() : state.playerName).slice(0, 24);
 		ensurePlayer(state.playerId, { name: state.playerName, isSelf: true });
-		saveStoredValue(PLAYER_NAME_KEY, state.playerName);
+		try {
+			localStorage.setItem(PLAYER_NAME_KEY, state.playerName);
+		} catch (_error) {
+			// Local storage can fail in restrictive contexts; the session name still works.
+		}
 		sendProfile();
 		renderLeaderboard();
 	};
 
 	const sendProfile = () => {
-		send({ type: "profile", playerId: state.playerId, name: state.playerName, isHost: state.isHosting, preset: state.racePreset });
+		send({ type: "profile", playerId: state.playerId, name: state.playerName });
 	};
 
 	const sendReady = (ready) => {
@@ -495,45 +427,6 @@
 		send({ type: "ready", playerId: state.playerId, name: state.playerName, ready: state.localReady });
 		updateUi();
 		renderLeaderboard();
-	};
-
-	const sendTrackSync = () => {
-		if (!state.isHosting || !state.trackSync) {
-			return;
-		}
-		send({ type: "track-sync", playerId: state.playerId, name: state.playerName, track: state.trackSync, preset: state.racePreset });
-	};
-
-	const setRacePreset = (preset, fromNetwork = false) => {
-		state.racePreset = preset || "nolimit";
-		applyRacePreset();
-		if (state.dom.preset) {
-			state.dom.preset.value = state.racePreset;
-		}
-		saveLobbySettings();
-		if (!fromNetwork && state.isHosting) {
-			send({ type: "preset", playerId: state.playerId, preset: state.racePreset });
-			sendTrackSync();
-		}
-		setStatus(`Race preset: ${getPresetLabel()}.`, "ok");
-		updateUi();
-	};
-
-	const applyTrackSync = (track, fromHost = false) => {
-		if (!track || !track.data) {
-			return;
-		}
-		state.trackSync = track;
-		if (track.preset) {
-			setRacePreset(track.preset, true);
-		}
-		if (state.dom.trackInfo) {
-			state.dom.trackInfo.textContent = `Track: ${track.name || "Synced track"} · ${getPresetLabel(track.preset || state.racePreset)}`;
-		}
-		if (fromHost && state.autoTrackSync && state.hooks && "function" === typeof state.hooks.openSyncedTrack) {
-			const opened = state.hooks.openSyncedTrack(track);
-			setStatus(opened ? `Loaded host track: ${track.name || "Synced track"}.` : "Could not auto-load the host track.", opened ? "ok" : "warn");
-		}
 	};
 
 	const setRacePaused = (paused) => {
@@ -548,84 +441,6 @@
 		} catch (_error) {
 			// Some browsers do not allow synthetic keyboard construction; rematch still resets the lobby state.
 		}
-	};
-
-	const resetRaceStats = () => {
-		state.ghostSamples = [];
-		state.lastGhostSampleAt = 0;
-		state.stats = {
-			topSpeedKmh: 0,
-			totalSpeedKmh: 0,
-			speedSamples: 0,
-			checkpointSplits: [],
-			lastCheckpoint: 0,
-		};
-	};
-
-	const rememberGhostSample = (carState) => {
-		if (!carState || "running" !== state.race.phase) {
-			return;
-		}
-		const now = performance.now();
-		if (now - state.lastGhostSampleAt < GHOST_SAMPLE_INTERVAL_MS) {
-			return;
-		}
-		state.lastGhostSampleAt = now;
-		state.ghostSamples.push(cloneState(carState));
-		while (state.ghostSamples.length > MAX_GHOST_SAMPLES) {
-			state.ghostSamples.shift();
-		}
-	};
-
-	const saveBestGhost = (player, carState) => {
-		if (!state.trackSync || !state.ghostSamples.length) {
-			return null;
-		}
-		const finishFrames = player.finishFrames || carState.totalFrames || carState.frames;
-		const ghost = {
-			trackId: state.trackSync.id,
-			trackName: state.trackSync.name,
-			preset: state.racePreset,
-			playerName: state.playerName,
-			finishFrames,
-			topSpeedKmh: player.topSpeedKmh || 0,
-			crashes: player.crashes || 0,
-			restarts: player.restarts || 0,
-			splits: state.stats.checkpointSplits.slice(),
-			samples: state.ghostSamples.map((sample) => cloneState(sample)),
-			savedAt: Date.now(),
-		};
-		const isBetter = !state.bestGhost || state.bestGhost.trackId !== ghost.trackId || state.bestGhost.preset !== ghost.preset || finishFrames < state.bestGhost.finishFrames;
-		if (isBetter) {
-			state.bestGhost = ghost;
-			saveStoredValue(BEST_GHOST_KEY, JSON.stringify(ghost));
-		}
-		return ghost;
-	};
-
-	const playGhost = (ghost = state.bestGhost) => {
-		if (!ghost || !Array.isArray(ghost.samples) || !ghost.samples.length) {
-			setStatus("No saved ghost yet. Finish a race first.", "warn");
-			return;
-		}
-		if (!state.hooks || "function" !== typeof state.hooks.pushRemoteState) {
-			setStatus("Open a track before playing a ghost.", "warn");
-			return;
-		}
-		if (state.ghostPlayback) {
-			clearInterval(state.ghostPlayback);
-			state.ghostPlayback = null;
-		}
-		let index = 0;
-		state.ghostPlayback = setInterval(() => {
-			if (!ghost.samples[index]) {
-				clearInterval(state.ghostPlayback);
-				state.ghostPlayback = null;
-				return;
-			}
-			state.hooks.pushRemoteState(ghost.samples[index++]);
-		}, GHOST_SAMPLE_INTERVAL_MS);
-		setStatus(`Playing ghost: ${ghost.playerName || "best run"} (${formatFrames(ghost.finishFrames)}).`, "ok");
 	};
 
 	const renderCountdown = () => {
@@ -674,24 +489,15 @@
 
 	const beginCountdown = (message) => {
 		updateServerClock(message.serverTime);
-		if (message.preset) {
-			setRacePreset(message.preset, true);
-		}
-		if (message.track) {
-			applyTrackSync(message.track, !state.isHosting);
-		}
 		stopRaceTimers();
 		state.race.phase = "countdown";
 		state.race.raceId = message.raceId || `${Date.now()}`;
 		state.race.startAt = Number(message.startAt) || getServerNow() + COUNTDOWN_MS;
 		state.localFinishSent = false;
-		resetRaceStats();
 		state.players.forEach((player) => {
 			player.hasFinished = false;
 			player.finishFrames = null;
 			player.finishAt = null;
-			player.topSpeedKmh = 0;
-			player.avgSpeedKmh = 0;
 		});
 		setRacePaused(true);
 		renderCountdown();
@@ -729,8 +535,7 @@
 			return;
 		}
 		savePlayerName();
-		sendTrackSync();
-		send({ type: "race", event: "start-request", raceId: `race-${Date.now().toString(36)}`, countdownMs: COUNTDOWN_MS, preset: state.racePreset, track: state.trackSync });
+		send({ type: "race", event: "start-request", raceId: `race-${Date.now().toString(36)}`, countdownMs: COUNTDOWN_MS });
 	};
 
 	const resetRaceState = (fromNetwork = false) => {
@@ -740,7 +545,6 @@
 		state.race.startAt = 0;
 		state.localReady = false;
 		state.localFinishSent = false;
-		resetRaceStats();
 		state.players.forEach((player) => {
 			player.ready = false;
 			player.hasFinished = false;
@@ -750,8 +554,6 @@
 			player.totalFrames = 0;
 			player.checkpoint = 0;
 			player.speedKmh = 0;
-			player.topSpeedKmh = 0;
-			player.avgSpeedKmh = 0;
 			player.crashes = 0;
 			player.restarts = 0;
 			player.lastCrashAt = 0;
@@ -801,8 +603,6 @@
 			const time = player.hasFinished ? formatFrames(player.finishFrames || player.totalFrames) : "running" === state.race.phase ? formatRaceTime(getServerNow() - state.race.startAt) : formatFrames(player.timeFrames);
 			const checkpoint = player.hasFinished ? "Finish" : `CP ${player.checkpoint || 0}`;
 			const speed = `${Math.round(player.speedKmh || 0)} km/h`;
-			const ping = null == player.pingMs ? "--" : `${Math.round(player.pingMs)}ms`;
-			const controls = player.isSelf ? "" : `<button type="button" data-follow="${escapeHtml(player.id)}">Follow</button>${state.isHosting ? `<button type="button" data-kick="${escapeHtml(player.id)}">Kick</button>` : ""}`;
 			return `<div class="multiplayer-leaderboard-row${player.isSelf ? " self" : ""}">
 				<span class="place">${index + 1}</span>
 				<span class="name">${escapeHtml(player.name || "Friend")}</span>
@@ -810,8 +610,6 @@
 				<span class="time">${time}</span>
 				<span class="speed">${speed}</span>
 				<span class="badge">${status}</span>
-				<span class="ping">${ping}</span>
-				<span class="actions">${controls}</span>
 			</div>`;
 		}).join("") || `<div class="multiplayer-empty">No racers yet.</div>`;
 		maybeShowResults();
@@ -843,7 +641,7 @@
 		state.dom.results.hidden = false;
 		state.dom.resultsList.innerHTML = finished.map((player, index) => `<div class="multiplayer-result-row${player.isSelf ? " self" : ""}">
 			<span>${index + 1}. ${escapeHtml(player.name || "Friend")}</span>
-			<strong>${formatFrames(player.finishFrames || player.totalFrames)} | Top ${Math.round(player.topSpeedKmh || 0)} | Avg ${Math.round(player.avgSpeedKmh || 0)} | C${player.crashes || 0} R${player.restarts || 0}</strong>
+			<strong>${formatFrames(player.finishFrames || player.totalFrames)} | C${player.crashes || 0} R${player.restarts || 0}</strong>
 		</div>`).join("");
 		updateUi();
 	};
@@ -864,15 +662,6 @@
 			crashes++;
 			lastCrashAt = getServerNow();
 		}
-		const speedKmh = carState.speedKmh || 0;
-		state.stats.topSpeedKmh = Math.max(state.stats.topSpeedKmh, speedKmh);
-		state.stats.totalSpeedKmh += speedKmh;
-		state.stats.speedSamples++;
-		if ((carState.nextCheckpointIndex || 0) > state.stats.lastCheckpoint) {
-			state.stats.lastCheckpoint = carState.nextCheckpointIndex || 0;
-			state.stats.checkpointSplits.push({ checkpoint: state.stats.lastCheckpoint, frames });
-		}
-		rememberGhostSample(carState);
 		const player = ensurePlayer(state.playerId, {
 			name: state.playerName,
 			isSelf: true,
@@ -880,9 +669,7 @@
 			checkpoint: carState.nextCheckpointIndex || 0,
 			timeFrames: frames,
 			totalFrames: carState.totalFrames || 0,
-			speedKmh,
-			topSpeedKmh: state.stats.topSpeedKmh,
-			avgSpeedKmh: state.stats.speedSamples ? state.stats.totalSpeedKmh / state.stats.speedSamples : 0,
+			speedKmh: carState.speedKmh || 0,
 			hasFinished: !!carState.hasFinished,
 			crashes,
 			restarts,
@@ -892,7 +679,6 @@
 			state.localFinishSent = true;
 			player.finishFrames = carState.totalFrames || carState.frames || Math.max(0, getServerNow() - state.race.startAt);
 			player.finishAt = getServerNow();
-			const ghost = saveBestGhost(player, carState);
 			send({
 				type: "result",
 				playerId: state.playerId,
@@ -902,10 +688,6 @@
 				finishAt: player.finishAt,
 				crashes: player.crashes,
 				restarts: player.restarts,
-				topSpeedKmh: player.topSpeedKmh,
-				avgSpeedKmh: player.avgSpeedKmh,
-				splits: state.stats.checkpointSplits,
-				ghost,
 			});
 			setStatus("Finished. Waiting for results.", "ok");
 			renderLeaderboard();
@@ -928,9 +710,6 @@
 			crashes++;
 			lastCrashAt = getServerNow();
 		}
-		const speedKmh = carState.speedKmh || 0;
-		const speedSamples = previous ? (previous.speedSamples || 0) + 1 : 1;
-		const totalSpeedKmh = (previous ? previous.totalSpeedKmh || 0 : 0) + speedKmh;
 		ensurePlayer(playerId, {
 			name: name || (state.players.get(playerId) && state.players.get(playerId).name) || "Friend",
 			isSelf: false,
@@ -938,11 +717,7 @@
 			checkpoint: carState.nextCheckpointIndex || 0,
 			timeFrames: frames,
 			totalFrames: carState.totalFrames || 0,
-			speedKmh,
-			topSpeedKmh: Math.max(previous ? previous.topSpeedKmh || 0 : 0, speedKmh),
-			avgSpeedKmh: totalSpeedKmh / speedSamples,
-			totalSpeedKmh,
-			speedSamples,
+			speedKmh: carState.speedKmh || 0,
 			hasFinished: !!carState.hasFinished,
 			finishFrames: carState.hasFinished ? carState.totalFrames || carState.frames : (state.players.get(playerId) && state.players.get(playerId).finishFrames) || null,
 			crashes,
@@ -955,50 +730,6 @@
 	const clearRemoteCar = () => {
 		if (state.hooks && "function" === typeof state.hooks.clearRemoteCar) {
 			state.hooks.clearRemoteCar();
-		}
-	};
-
-	const startPingTimer = () => {
-		if (state.pingTimer) {
-			clearInterval(state.pingTimer);
-		}
-		state.pingTimer = setInterval(() => {
-			if (!state.socket || WebSocket.OPEN !== state.socket.readyState) {
-				return;
-			}
-			const pingId = `${state.playerId}-${Date.now()}`;
-			state.pingSentAt.set(pingId, performance.now());
-			send({ type: "ping", playerId: state.playerId, name: state.playerName, pingId, sentAt: Date.now() });
-		}, PING_INTERVAL_MS);
-	};
-
-	const stopPingTimer = () => {
-		if (state.pingTimer) {
-			clearInterval(state.pingTimer);
-			state.pingTimer = null;
-		}
-		state.pingSentAt.clear();
-	};
-
-	const kickPlayer = (playerId) => {
-		if (!state.isHosting || !playerId || playerId === state.playerId) {
-			return;
-		}
-		const player = state.players.get(playerId);
-		send({ type: "host-control", event: "kick", playerId: state.playerId, targetPlayerId: playerId });
-		state.players.delete(playerId);
-		setStatus(`${player ? player.name : "Player"} was kicked from the room.`, "warn");
-		renderLeaderboard();
-	};
-
-	const followPlayer = (playerId) => {
-		if (playerId === state.playerId) {
-			return;
-		}
-		if (state.hooks && "function" === typeof state.hooks.followRemoteCar) {
-			state.hooks.followRemoteCar();
-			const player = state.players.get(playerId);
-			setStatus(`Following ${player ? player.name : "friend"}.`, "ok");
 		}
 	};
 
@@ -1030,20 +761,8 @@
 		return `ws://${trimmed}:${port}`;
 	};
 
-	const normalizeRelayUrl = (value) => {
-		const trimmed = value.trim();
-		if (/^wss?:\/\//i.test(trimmed)) {
-			return trimmed;
-		}
-		return `ws://${trimmed || "127.0.0.1:8080"}`;
-	};
-
 	const refreshHostInfo = () => {
 		if (!state.dom.hostInfo) {
-			return;
-		}
-		if ("relay" === state.connectionKind && state.roomCode) {
-			state.dom.hostInfo.textContent = `Public room code: ${state.roomCode}\nRelay: ${state.relayUrl}`;
 			return;
 		}
 		if (!state.hostInfo || !state.hostInfo.urls || 0 === state.hostInfo.urls.length) {
@@ -1070,19 +789,10 @@
 		state.dom.panel.hidden = !state.panelOpen;
 		state.dom.toggle.textContent = state.panelOpen ? "Hide Online" : "Online";
 		state.dom.startHost.disabled = state.isHosting;
-		if (state.dom.publicHost) {
-			state.dom.publicHost.disabled = !!state.socket;
-		}
 		state.dom.join.disabled = state.isHosting;
 		state.dom.stop.disabled = !state.isHosting && !state.socket;
 		state.dom.joinUrl.disabled = state.isHosting;
 		state.dom.port.disabled = !!state.socket;
-		if (state.dom.relayUrl) {
-			state.dom.relayUrl.disabled = !!state.socket;
-		}
-		if (state.dom.preset) {
-			state.dom.preset.disabled = "countdown" === state.race.phase || "running" === state.race.phase || (!state.isHosting && !!state.socket);
-		}
 		state.dom.newWindow.disabled = !window.electron || "function" !== typeof window.electron.newWindow;
 		if (state.dom.ready) {
 			state.dom.ready.disabled = !state.socket || "countdown" === state.race.phase || "running" === state.race.phase;
@@ -1094,9 +804,6 @@
 		if (state.dom.rematch) {
 			state.dom.rematch.disabled = !state.socket && !state.isHosting;
 		}
-		if (state.dom.playGhost) {
-			state.dom.playGhost.disabled = !state.bestGhost;
-		}
 	};
 
 	const handleMessage = (message) => {
@@ -1104,49 +811,6 @@
 			return;
 		}
 		updateServerClock(message.serverTime);
-		if ("room" === message.type && "created" === message.event) {
-			state.roomCode = message.code || "";
-			state.isHosting = true;
-			state.hostPlayerId = state.playerId;
-			state.pendingRelayAction = null;
-			refreshHostInfo();
-			send({ type: "hello", role: "host", playerId: state.playerId, name: state.playerName });
-			sendProfile();
-			sendTrackSync();
-			startPingTimer();
-			setStatus(`Public room created. Share ${state.roomCode}.`, "ok");
-			updateUi();
-			return;
-		}
-		if ("room" === message.type && "joined" === message.event) {
-			state.roomCode = message.code || state.pendingRelayCode;
-			state.isHosting = !!message.isHost;
-			state.hostPlayerId = message.hostPlayerId || null;
-			state.pendingRelayAction = null;
-			refreshHostInfo();
-			send({ type: "hello", role: state.isHosting ? "host" : "guest", playerId: state.playerId, name: state.playerName });
-			sendProfile();
-			startPingTimer();
-			setStatus(`Joined public room ${state.roomCode}.`, "ok");
-			updateUi();
-			return;
-		}
-		if ("room" === message.type && "error" === message.event) {
-			setStatus(message.message || "Relay room error.", "error");
-			return;
-		}
-		if ("room" === message.type && "peer-count" === message.event) {
-			updatePeerCount(message.peers || 0);
-			return;
-		}
-		if ("room" === message.type && "host" === message.event) {
-			state.isHosting = true;
-			state.hostPlayerId = state.playerId;
-			setStatus("You are the room host now.", "ok");
-			updateUi();
-			renderLeaderboard();
-			return;
-		}
 		if ("server" === message.type && "peer-count" === message.event) {
 			updatePeerCount(message.peers || 0);
 			if (state.isHosting && message.peers > 0) {
@@ -1158,28 +822,11 @@
 			renderLeaderboard();
 			return;
 		}
-		if ("host-control" === message.type && "kick" === message.event && message.targetPlayerId === state.playerId) {
-			setStatus("The host removed you from the room.", "warn");
-			disconnectSocket();
-			return;
-		}
-		if ("ping" === message.type && message.playerId !== state.playerId) {
-			send({ type: "pong", playerId: state.playerId, targetPlayerId: message.playerId, pingId: message.pingId });
-			return;
-		}
-		if ("pong" === message.type && message.targetPlayerId === state.playerId && state.pingSentAt.has(message.pingId)) {
-			const elapsed = performance.now() - state.pingSentAt.get(message.pingId);
-			state.pingSentAt.delete(message.pingId);
-			ensurePlayer(message.playerId, { pingMs: elapsed });
-			renderLeaderboard();
-			return;
-		}
 		if ("hello" === message.type) {
 			if (message.playerId && message.playerId !== state.playerId) {
 				ensurePlayer(message.playerId, { name: message.name || "Friend", isSelf: false, connected: true });
 				sendProfile();
 				send({ type: "ready", playerId: state.playerId, name: state.playerName, ready: state.localReady });
-				sendTrackSync();
 				renderLeaderboard();
 			}
 			setStatus("Friend connected. Load the same track, ready up, then start the race.", "ok");
@@ -1193,14 +840,6 @@
 		if ("ready" === message.type && message.playerId && message.playerId !== state.playerId) {
 			ensurePlayer(message.playerId, { name: message.name || "Friend", isSelf: false, ready: !!message.ready, connected: true });
 			renderLeaderboard();
-			return;
-		}
-		if ("preset" === message.type && message.preset && message.playerId !== state.playerId) {
-			setRacePreset(message.preset, true);
-			return;
-		}
-		if ("track-sync" === message.type && message.track && message.playerId !== state.playerId) {
-			applyTrackSync(message.track, !state.isHosting);
 			return;
 		}
 		if ("race" === message.type && "countdown" === message.event) {
@@ -1220,15 +859,7 @@
 				finishAt: message.finishAt,
 				crashes: message.crashes || 0,
 				restarts: message.restarts || 0,
-				topSpeedKmh: message.topSpeedKmh || 0,
-				avgSpeedKmh: message.avgSpeedKmh || 0,
-				splits: message.splits || [],
-				ghost: message.ghost || null,
 			});
-			if (message.ghost && (!state.bestGhost || message.ghost.finishFrames < state.bestGhost.finishFrames)) {
-				state.bestGhost = message.ghost;
-				saveStoredValue(BEST_GHOST_KEY, JSON.stringify(message.ghost));
-			}
 			renderLeaderboard();
 			return;
 		}
@@ -1240,12 +871,8 @@
 
 	const disconnectSocket = () => {
 		stopRaceTimers();
-		stopPingTimer();
 		state.race.phase = "idle";
 		state.race.raceId = null;
-		state.roomCode = "";
-		state.pendingRelayAction = null;
-		state.pendingRelayCode = "";
 		if (!state.socket) {
 			clearRemoteCar();
 			updatePeerCount(0);
@@ -1278,12 +905,8 @@
 		updateUi();
 	};
 
-	const connect = (url, options = {}) => {
+	const connect = (url) => {
 		disconnectSocket();
-		state.connectionKind = options.connectionKind || "direct";
-		state.pendingRelayAction = options.relayAction || null;
-		state.pendingRelayCode = options.roomCode || "";
-		state.isHosting = !!options.isHosting;
 		setStatus(`Connecting to ${url}...`, "info");
 		const socket = new WebSocket(url);
 		state.socket = socket;
@@ -1293,21 +916,9 @@
 			state.lastSnapshotAt = 0;
 			savePlayerName();
 			ensurePlayer(state.playerId, { name: state.playerName, isSelf: true, connected: true });
-			if ("relay" === state.connectionKind && state.pendingRelayAction) {
-				send({
-					type: "room",
-					event: state.pendingRelayAction,
-					code: state.pendingRelayCode,
-					playerId: state.playerId,
-					name: state.playerName,
-				});
-				setStatus("Connected to relay. Waiting for room confirmation.", "info");
-			} else {
-				send({ type: "hello", role: state.isHosting ? "host" : "guest", playerId: state.playerId, name: state.playerName });
-				sendProfile();
-				startPingTimer();
-				setStatus(state.isHosting ? "Room created. Share the room code, load a track, and ready up." : "Joined room. Load the same track, ready up, then race.", "ok");
-			}
+			send({ type: "hello", role: state.isHosting ? "host" : "guest", playerId: state.playerId, name: state.playerName });
+			sendProfile();
+			setStatus(state.isHosting ? "Room created. Share the room code, load a track, and ready up." : "Joined room. Load the same track, ready up, then race.", "ok");
 			renderLeaderboard();
 			updateUi();
 		};
@@ -1340,7 +951,7 @@
 
 	const stop = async () => {
 		disconnectSocket();
-		if (state.isHosting && "direct" === state.connectionKind && window.electron && window.electron.multiplayer) {
+		if (state.isHosting && window.electron && window.electron.multiplayer) {
 			try {
 				await window.electron.multiplayer.stopHost();
 			} catch (_error) {
@@ -1348,8 +959,6 @@
 			}
 		}
 		state.isHosting = false;
-		state.connectionKind = "direct";
-		state.roomCode = "";
 		state.hostInfo = null;
 		refreshHostInfo();
 		setStatus("Offline.", "info");
@@ -1364,38 +973,13 @@
 		const port = Number(state.dom.port.value) || DEFAULT_PORT;
 		try {
 			state.hostInfo = await window.electron.multiplayer.startHost(port);
-			state.connectionKind = "direct";
 			state.isHosting = true;
 			refreshHostInfo();
 			updateUi();
-			connect(`ws://127.0.0.1:${state.hostInfo.port}`, { connectionKind: "direct", isHosting: true });
+			connect(`ws://127.0.0.1:${state.hostInfo.port}`);
 		} catch (error) {
 			setStatus(error && error.message ? error.message : "Could not start the host.", "error");
 		}
-	};
-
-	const startRelayCreate = () => {
-		state.relayUrl = normalizeRelayUrl(state.dom.relayUrl.value);
-		state.dom.relayUrl.value = state.relayUrl;
-		saveLobbySettings();
-		state.hostInfo = null;
-		refreshHostInfo();
-		connect(state.relayUrl, { connectionKind: "relay", relayAction: "create", isHosting: true });
-	};
-
-	const startRelayJoin = (code) => {
-		const normalizedCode = (code || "").trim().toUpperCase();
-		if (!normalizedCode) {
-			setStatus("Enter a public room code first.", "warn");
-			return;
-		}
-		state.relayUrl = normalizeRelayUrl(state.dom.relayUrl.value);
-		state.dom.relayUrl.value = state.relayUrl;
-		saveLobbySettings();
-		state.isHosting = false;
-		state.hostInfo = null;
-		refreshHostInfo();
-		connect(state.relayUrl, { connectionKind: "relay", relayAction: "join", roomCode: normalizedCode, isHosting: false });
 	};
 
 	const join = () => {
@@ -1403,12 +987,7 @@
 		state.hostInfo = null;
 		refreshHostInfo();
 		updateUi();
-		const directUrl = decodeRoomCode(state.dom.joinUrl.value.trim());
-		if (directUrl || /^wss?:\/\//i.test(state.dom.joinUrl.value.trim()) || /^\d+$/.test(state.dom.joinUrl.value.trim()) || state.dom.joinUrl.value.trim().includes(":")) {
-			connect(normalizeUrl(state.dom.joinUrl.value, Number(state.dom.port.value) || DEFAULT_PORT), { connectionKind: "direct", isHosting: false });
-			return;
-		}
-		startRelayJoin(state.dom.joinUrl.value.trim());
+		connect(normalizeUrl(state.dom.joinUrl.value, Number(state.dom.port.value) || DEFAULT_PORT));
 	};
 
 	const attachHooks = () => {
@@ -1418,14 +997,6 @@
 		}
 		state.hooks = window.__polytrackMpHooks;
 		installRemoteSmoothing();
-		applyRacePreset();
-		if ("function" === typeof state.hooks.getTrackSync && state.hooks.getTrackSync()) {
-			applyTrackSync(state.hooks.getTrackSync(), false);
-		}
-		state.hooks.onTrackChanged = (track) => {
-			applyTrackSync(track, false);
-			sendTrackSync();
-		};
 		state.hooks.onLocalState = (carState) => {
 			updateLocalPlayerFromState(carState);
 			if (!state.socket || WebSocket.OPEN !== state.socket.readyState) {
@@ -1504,23 +1075,6 @@
 	background: rgba(255, 255, 255, 0.08);
 	color: #f8fafc;
 }
-#multiplayer-panel select,
-#multiplayer-panel label {
-	border: 0;
-	border-radius: 10px;
-	padding: 10px 12px;
-	font: inherit;
-	background: rgba(255, 255, 255, 0.08);
-	color: #f8fafc;
-}
-#multiplayer-panel label {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-#multiplayer-panel label input {
-	flex: 0;
-}
 #multiplayer-panel button {
 	background: #f97316;
 	color: #111827;
@@ -1591,7 +1145,7 @@
 }
 .multiplayer-leaderboard-row {
 	display: grid;
-	grid-template-columns: 26px minmax(78px, 1fr) 50px 78px 58px 38px 48px minmax(72px, auto);
+	grid-template-columns: 26px minmax(82px, 1fr) 54px 82px 64px 40px;
 	align-items: center;
 	gap: 6px;
 	padding: 7px 8px;
@@ -1620,20 +1174,6 @@
 	color: #fed7aa;
 	font-size: 10px;
 	font-weight: 800;
-}
-.multiplayer-leaderboard-row .actions {
-	display: flex;
-	gap: 4px;
-	justify-content: flex-end;
-}
-.multiplayer-leaderboard-row .actions button {
-	padding: 4px 6px;
-	border-radius: 6px;
-	font-size: 10px;
-}
-.multiplayer-leaderboard-row .ping {
-	color: #cbd5e1;
-	font-variant-numeric: tabular-nums;
 }
 .multiplayer-empty {
 	padding: 10px;
@@ -1692,11 +1232,6 @@
 	font-weight: 800;
 	cursor: pointer;
 }
-#multiplayer-track-info {
-	margin: 8px 0;
-	color: #cbd5e1;
-	font-size: 12px;
-}
 `;
 		document.head.appendChild(style);
 
@@ -1710,22 +1245,8 @@
 		<input id="multiplayer-name" type="text" maxlength="24" placeholder="Player name">
 	</div>
 	<div class="row">
-		<select id="multiplayer-preset">
-			<option value="stock">Normal</option>
-			<option value="nolimit">F1 No Limit</option>
-			<option value="timetrial">Time Trial</option>
-			<option value="chaos">Chaos</option>
-			<option value="collision">Collision Lite</option>
-		</select>
-		<label><input id="multiplayer-auto-track" type="checkbox"> Track sync</label>
-	</div>
-	<div class="row">
-		<input id="multiplayer-relay-url" type="text" placeholder="Public relay ws://host:8080">
-		<button id="multiplayer-public-host" type="button">Public</button>
-	</div>
-	<div class="row">
 		<input id="multiplayer-port" type="number" min="1024" max="65535" value="32323" placeholder="Port">
-		<button id="multiplayer-host" type="button">LAN</button>
+		<button id="multiplayer-host" type="button">Create Room</button>
 	</div>
 	<div class="row">
 		<input id="multiplayer-join" type="text" placeholder="Room code or ws://host-ip:32323">
@@ -1736,12 +1257,10 @@
 		<button id="multiplayer-start-race" type="button">Start Race</button>
 		<button id="multiplayer-rematch" type="button" class="secondary">Rematch</button>
 	</div>
-	<div id="multiplayer-track-info">Track: none loaded</div>
 	<div id="multiplayer-race-clock">00:00.000</div>
 	<div class="row">
 		<button id="multiplayer-stop" type="button" class="secondary">Disconnect</button>
 		<button id="multiplayer-new-window" type="button" class="secondary">New Window</button>
-		<button id="multiplayer-play-ghost" type="button" class="secondary">Ghost</button>
 	</div>
 	<div id="multiplayer-status" data-tone="info">Offline.</div>
 	<div id="multiplayer-host-info">Room code and host addresses will appear here.</div>
@@ -1762,10 +1281,6 @@
 		state.dom.toggle = root.querySelector("#multiplayer-toggle");
 		state.dom.panel = root.querySelector("#multiplayer-panel");
 		state.dom.playerName = root.querySelector("#multiplayer-name");
-		state.dom.preset = root.querySelector("#multiplayer-preset");
-		state.dom.autoTrack = root.querySelector("#multiplayer-auto-track");
-		state.dom.relayUrl = root.querySelector("#multiplayer-relay-url");
-		state.dom.publicHost = root.querySelector("#multiplayer-public-host");
 		state.dom.port = root.querySelector("#multiplayer-port");
 		state.dom.startHost = root.querySelector("#multiplayer-host");
 		state.dom.joinUrl = root.querySelector("#multiplayer-join");
@@ -1773,11 +1288,9 @@
 		state.dom.ready = root.querySelector("#multiplayer-ready");
 		state.dom.startRace = root.querySelector("#multiplayer-start-race");
 		state.dom.rematch = root.querySelector("#multiplayer-rematch");
-		state.dom.trackInfo = root.querySelector("#multiplayer-track-info");
 		state.dom.raceClock = root.querySelector("#multiplayer-race-clock");
 		state.dom.stop = root.querySelector("#multiplayer-stop");
 		state.dom.newWindow = root.querySelector("#multiplayer-new-window");
-		state.dom.playGhost = root.querySelector("#multiplayer-play-ghost");
 		state.dom.status = root.querySelector("#multiplayer-status");
 		state.dom.hostInfo = root.querySelector("#multiplayer-host-info");
 		state.dom.leaderboard = root.querySelector("#multiplayer-leaderboard");
@@ -1787,9 +1300,6 @@
 		state.dom.resultsRematch = root.querySelector("#multiplayer-results-rematch");
 		state.dom.peerCount = root.querySelector("#multiplayer-peer-count");
 		state.dom.playerName.value = state.playerName;
-		state.dom.preset.value = state.racePreset;
-		state.dom.autoTrack.checked = state.autoTrackSync;
-		state.dom.relayUrl.value = state.relayUrl;
 
 		state.dom.toggle.addEventListener("click", () => {
 			state.panelOpen = !state.panelOpen;
@@ -1797,21 +1307,6 @@
 		});
 		state.dom.playerName.addEventListener("change", () => {
 			savePlayerName();
-		});
-		state.dom.preset.addEventListener("change", () => {
-			setRacePreset(state.dom.preset.value);
-		});
-		state.dom.autoTrack.addEventListener("change", () => {
-			state.autoTrackSync = state.dom.autoTrack.checked;
-			saveLobbySettings();
-		});
-		state.dom.relayUrl.addEventListener("change", () => {
-			state.relayUrl = normalizeRelayUrl(state.dom.relayUrl.value);
-			state.dom.relayUrl.value = state.relayUrl;
-			saveLobbySettings();
-		});
-		state.dom.publicHost.addEventListener("click", () => {
-			startRelayCreate();
 		});
 		state.dom.startHost.addEventListener("click", () => {
 			startHost();
@@ -1834,22 +1329,6 @@
 		});
 		state.dom.newWindow.addEventListener("click", () => {
 			openAnotherWindow();
-		});
-		state.dom.playGhost.addEventListener("click", () => {
-			playGhost();
-		});
-		state.dom.leaderboard.addEventListener("click", (event) => {
-			const target = event.target;
-			if (!(target instanceof HTMLElement)) {
-				return;
-			}
-			const kickId = target.getAttribute("data-kick");
-			const followId = target.getAttribute("data-follow");
-			if (kickId) {
-				kickPlayer(kickId);
-			} else if (followId) {
-				followPlayer(followId);
-			}
 		});
 		state.dom.resultsRematch.addEventListener("click", () => {
 			resetRaceState(false);

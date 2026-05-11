@@ -120,8 +120,6 @@ class MultiplayerHost {
 				event: "countdown",
 				raceId: parsed.raceId || `${now}`,
 				countdownMs: Math.max(1000, Math.min(10000, Number(parsed.countdownMs) || 4000)),
-				preset: parsed.preset,
-				track: parsed.track,
 				serverTime: now,
 				startAt: now + Math.max(1000, Math.min(10000, Number(parsed.countdownMs) || 4000)),
 			});
