@@ -1,9 +1,22 @@
+const { networkInterfaces } = require("os");
 const { createServer } = require("http");
 const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const rooms = new Map();
+
+const getLanAddresses = () => {
+	const addresses = [];
+	Object.values(networkInterfaces()).forEach((entries) => {
+		(entries || []).forEach((entry) => {
+			if (entry && "IPv4" === entry.family && !entry.internal) {
+				addresses.push(entry.address);
+			}
+		});
+	});
+	return addresses;
+};
 
 const makeRoomCode = () => {
 	for (let attempt = 0; attempt < 1000; attempt++) {
@@ -174,5 +187,21 @@ server.on("connection", (socket) => {
 });
 
 httpServer.listen(PORT, () => {
-	console.log(`PolyTrack public relay listening on ws://0.0.0.0:${PORT}`);
+	const lanAddresses = getLanAddresses();
+	console.log("PolyTrack public relay is running.");
+	console.log("");
+	console.log(`This PC: ws://127.0.0.1:${PORT}`);
+	if (lanAddresses.length > 0) {
+		console.log("Same Wi-Fi:");
+		lanAddresses.forEach((address) => {
+			console.log(`  ws://${address}:${PORT}`);
+		});
+	}
+	console.log("");
+	console.log("Different Wi-Fi:");
+	console.log(`  1. Port-forward TCP ${PORT} on your router to this PC.`);
+	console.log(`  2. Friends use ws://YOUR-PUBLIC-IP:${PORT} as the Relay URL.`);
+	console.log("  3. Host clicks Public Room and shares the 6-character code.");
+	console.log("");
+	console.log(`Listening internally on ws://0.0.0.0:${PORT}`);
 });
