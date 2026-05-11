@@ -8,17 +8,29 @@
 	const COUNTDOWN_MS = 4000;
 	const LEADERBOARD_REFRESH_MS = 120;
 	const PLAYER_NAME_KEY = "polytrack.multiplayer.playerName";
+	const RELAY_URL_KEY = "polytrack.multiplayer.relayUrl";
 	const ROOM_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 	const createPlayerId = () => `p-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36).slice(-4)}`;
-	const loadPlayerName = () => {
+	const loadStoredValue = (key, fallback) => {
 		try {
-			const savedName = localStorage.getItem(PLAYER_NAME_KEY);
-			if (savedName && savedName.trim()) {
-				return savedName.trim().slice(0, 24);
-			}
+			const value = localStorage.getItem(key);
+			return null == value ? fallback : value;
 		} catch (_error) {
-			// Ignore storage failures and fall back to a generated display name.
+			return fallback;
+		}
+	};
+	const saveStoredValue = (key, value) => {
+		try {
+			localStorage.setItem(key, value);
+		} catch (_error) {
+			// Local storage can fail in restrictive contexts; the session value still works.
+		}
+	};
+	const loadPlayerName = () => {
+		const savedName = loadStoredValue(PLAYER_NAME_KEY, "");
+		if (savedName && savedName.trim()) {
+			return savedName.trim().slice(0, 24);
 		}
 		return `Player ${Math.floor(100 + 900 * Math.random())}`;
 	};
@@ -27,9 +39,15 @@
 		hooks: null,
 		socket: null,
 		isHosting: false,
+		connectionKind: "direct",
+		pendingRelayAction: null,
+		pendingRelayCode: "",
+		roomCode: "",
+		relayUrl: loadStoredValue(RELAY_URL_KEY, "ws://127.0.0.1:8080"),
 		hostInfo: null,
 		playerId: createPlayerId(),
 		playerName: loadPlayerName(),
+		hostPlayerId: null,
 		serverClockOffsetMs: 0,
 		lastSnapshotAt: 0,
 		remoteSamples: [],
@@ -406,11 +424,7 @@
 	const savePlayerName = () => {
 		state.playerName = (state.dom.playerName && state.dom.playerName.value.trim() ? state.dom.playerName.value.trim() : state.playerName).slice(0, 24);
 		ensurePlayer(state.playerId, { name: state.playerName, isSelf: true });
-		try {
-			localStorage.setItem(PLAYER_NAME_KEY, state.playerName);
-		} catch (_error) {
-			// Local storage can fail in restrictive contexts; the session name still works.
-		}
+		saveStoredValue(PLAYER_NAME_KEY, state.playerName);
 		sendProfile();
 		renderLeaderboard();
 	};
@@ -761,8 +775,20 @@
 		return `ws://${trimmed}:${port}`;
 	};
 
+	const normalizeRelayUrl = (value) => {
+		const trimmed = value.trim();
+		if (/^wss?:\/\//i.test(trimmed)) {
+			return trimmed;
+		}
+		return `ws://${trimmed || "127.0.0.1:8080"}`;
+	};
+
 	const refreshHostInfo = () => {
 		if (!state.dom.hostInfo) {
+			return;
+		}
+		if ("relay" === state.connectionKind && state.roomCode) {
+			state.dom.hostInfo.textContent = `Public room code: ${state.roomCode}\nRelay: ${state.relayUrl}`;
 			return;
 		}
 		if (!state.hostInfo || !state.hostInfo.urls || 0 === state.hostInfo.urls.length) {
@@ -788,11 +814,20 @@
 		}
 		state.dom.panel.hidden = !state.panelOpen;
 		state.dom.toggle.textContent = state.panelOpen ? "Hide Online" : "Online";
-		state.dom.startHost.disabled = state.isHosting;
-		state.dom.join.disabled = state.isHosting;
+		state.dom.startHost.disabled = !!state.socket || state.isHosting;
+		if (state.dom.publicHost) {
+			state.dom.publicHost.disabled = !!state.socket || state.isHosting;
+		}
+		if (state.dom.publicJoin) {
+			state.dom.publicJoin.disabled = !!state.socket || state.isHosting;
+		}
+		state.dom.join.disabled = !!state.socket || state.isHosting;
 		state.dom.stop.disabled = !state.isHosting && !state.socket;
-		state.dom.joinUrl.disabled = state.isHosting;
+		state.dom.joinUrl.disabled = !!state.socket || state.isHosting;
 		state.dom.port.disabled = !!state.socket;
+		if (state.dom.relayUrl) {
+			state.dom.relayUrl.disabled = !!state.socket;
+		}
 		state.dom.newWindow.disabled = !window.electron || "function" !== typeof window.electron.newWindow;
 		if (state.dom.ready) {
 			state.dom.ready.disabled = !state.socket || "countdown" === state.race.phase || "running" === state.race.phase;
@@ -806,11 +841,55 @@
 		}
 	};
 
+	const announceConnected = () => {
+		state.lastSnapshotAt = 0;
+		savePlayerName();
+		ensurePlayer(state.playerId, { name: state.playerName, isSelf: true, connected: true });
+		send({ type: "hello", role: state.isHosting ? "host" : "guest", playerId: state.playerId, name: state.playerName });
+		sendProfile();
+		renderLeaderboard();
+		updateUi();
+	};
+
 	const handleMessage = (message) => {
 		if (!message || "object" !== typeof message) {
 			return;
 		}
 		updateServerClock(message.serverTime);
+		if ("room" === message.type) {
+			if ("created" === message.event || "joined" === message.event) {
+				state.connectionKind = "relay";
+				state.pendingRelayAction = null;
+				state.pendingRelayCode = "";
+				state.roomCode = message.code || state.roomCode;
+				state.isHosting = !!message.isHost;
+				state.hostPlayerId = message.hostPlayerId || (state.isHosting ? state.playerId : null);
+				state.hostInfo = null;
+				updatePeerCount(0);
+				refreshHostInfo();
+				announceConnected();
+				setStatus(state.isHosting ? `Public room ${state.roomCode} created. Share this code with friends.` : `Joined public room ${state.roomCode}. Load the same track, ready up, then race.`, "ok");
+				return;
+			}
+			if ("host" === message.event) {
+				state.isHosting = true;
+				state.hostPlayerId = state.playerId;
+				setStatus("You are now the room host.", "ok");
+				updateUi();
+				return;
+			}
+			if ("peer-count" === message.event) {
+				updatePeerCount(message.peers || 0);
+				if (state.isHosting && message.peers > 0) {
+					setStatus("Friend connected. Load the same track, ready up, then start the race.", "ok");
+				}
+				return;
+			}
+			if ("error" === message.event) {
+				setStatus(message.message || "Public room error.", "error");
+				return;
+			}
+		}
 		if ("server" === message.type && "peer-count" === message.event) {
 			updatePeerCount(message.peers || 0);
 			if (state.isHosting && message.peers > 0) {
@@ -913,14 +992,20 @@
 		updateUi();
 
 		socket.onopen = () => {
-			state.lastSnapshotAt = 0;
-			savePlayerName();
-			ensurePlayer(state.playerId, { name: state.playerName, isSelf: true, connected: true });
-			send({ type: "hello", role: state.isHosting ? "host" : "guest", playerId: state.playerId, name: state.playerName });
-			sendProfile();
+			if ("relay" === state.connectionKind) {
+				savePlayerName();
+				if ("create" === state.pendingRelayAction) {
+					send({ type: "room", event: "create", playerId: state.playerId, name: state.playerName });
+					setStatus("Connected to relay. Creating public room...", "info");
+				} else {
+					send({ type: "room", event: "join", code: state.pendingRelayCode, playerId: state.playerId, name: state.playerName });
+					setStatus(`Connected to relay. Joining ${state.pendingRelayCode}...`, "info");
+				}
+				updateUi();
+				return;
+			}
+			announceConnected();
 			setStatus(state.isHosting ? "Room created. Share the room code, load a track, and ready up." : "Joined room. Load the same track, ready up, then race.", "ok");
-			renderLeaderboard();
-			updateUi();
 		};
 
 		socket.onmessage = (event) => {
@@ -942,6 +1027,12 @@
 				updatePeerCount(0);
 				state.localReady = false;
 				setRacePaused(false);
+				if ("relay" === state.connectionKind) {
+					state.isHosting = false;
+					state.roomCode = "";
+					state.hostPlayerId = null;
+					refreshHostInfo();
+				}
 				setStatus(state.isHosting && state.hostInfo ? "Host is still running. Waiting for a friend to connect." : "Disconnected.", "warn");
 				renderLeaderboard();
 				updateUi();
@@ -951,7 +1042,7 @@
 
 	const stop = async () => {
 		disconnectSocket();
-		if (state.isHosting && window.electron && window.electron.multiplayer) {
+		if ("direct" === state.connectionKind && state.isHosting && window.electron && window.electron.multiplayer) {
 			try {
 				await window.electron.multiplayer.stopHost();
 			} catch (_error) {
@@ -959,6 +1050,11 @@
 			}
 		}
 		state.isHosting = false;
+		state.connectionKind = "direct";
+		state.pendingRelayAction = null;
+		state.pendingRelayCode = "";
+		state.roomCode = "";
+		state.hostPlayerId = null;
 		state.hostInfo = null;
 		refreshHostInfo();
 		setStatus("Offline.", "info");
@@ -970,6 +1066,11 @@
 			setStatus("Host mode only works in the Electron desktop app.", "error");
 			return;
 		}
+		state.connectionKind = "direct";
+		state.pendingRelayAction = null;
+		state.pendingRelayCode = "";
+		state.roomCode = "";
+		state.hostPlayerId = state.playerId;
 		const port = Number(state.dom.port.value) || DEFAULT_PORT;
 		try {
 			state.hostInfo = await window.electron.multiplayer.startHost(port);
@@ -982,7 +1083,47 @@
 		}
 	};
 
+	const startPublicRoom = () => {
+		state.relayUrl = normalizeRelayUrl(state.dom.relayUrl ? state.dom.relayUrl.value : state.relayUrl);
+		saveStoredValue(RELAY_URL_KEY, state.relayUrl);
+		state.connectionKind = "relay";
+		state.pendingRelayAction = "create";
+		state.pendingRelayCode = "";
+		state.roomCode = "";
+		state.hostInfo = null;
+		state.hostPlayerId = state.playerId;
+		state.isHosting = false;
+		refreshHostInfo();
+		updateUi();
+		connect(state.relayUrl);
+	};
+
+	const joinPublicRoom = () => {
+		const code = (state.dom.joinUrl.value || "").trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+		if (!code) {
+			setStatus("Enter the public room code your friend shared.", "warn");
+			return;
+		}
+		state.relayUrl = normalizeRelayUrl(state.dom.relayUrl ? state.dom.relayUrl.value : state.relayUrl);
+		saveStoredValue(RELAY_URL_KEY, state.relayUrl);
+		state.connectionKind = "relay";
+		state.pendingRelayAction = "join";
+		state.pendingRelayCode = code;
+		state.roomCode = "";
+		state.hostInfo = null;
+		state.hostPlayerId = null;
+		state.isHosting = false;
+		refreshHostInfo();
+		updateUi();
+		connect(state.relayUrl);
+	};
+
 	const join = () => {
+		state.connectionKind = "direct";
+		state.pendingRelayAction = null;
+		state.pendingRelayCode = "";
+		state.roomCode = "";
+		state.hostPlayerId = null;
 		state.isHosting = false;
 		state.hostInfo = null;
 		refreshHostInfo();
@@ -1249,8 +1390,13 @@
 		<button id="multiplayer-host" type="button">Create Room</button>
 	</div>
 	<div class="row">
-		<input id="multiplayer-join" type="text" placeholder="Room code or ws://host-ip:32323">
+		<input id="multiplayer-relay" type="text" placeholder="Relay URL (wss://your-relay.onrender.com)">
+		<button id="multiplayer-public-host" type="button" class="secondary">Public Room</button>
+	</div>
+	<div class="row">
+		<input id="multiplayer-join" type="text" placeholder="Room code, public code, or ws://host-ip:32323">
 		<button id="multiplayer-join-button" type="button" class="secondary">Join</button>
+		<button id="multiplayer-public-join" type="button" class="secondary">Join Public</button>
 	</div>
 	<div id="multiplayer-race-tools">
 		<button id="multiplayer-ready" type="button" class="secondary">Ready</button>
@@ -1283,8 +1429,11 @@
 		state.dom.playerName = root.querySelector("#multiplayer-name");
 		state.dom.port = root.querySelector("#multiplayer-port");
 		state.dom.startHost = root.querySelector("#multiplayer-host");
+		state.dom.relayUrl = root.querySelector("#multiplayer-relay");
+		state.dom.publicHost = root.querySelector("#multiplayer-public-host");
 		state.dom.joinUrl = root.querySelector("#multiplayer-join");
 		state.dom.join = root.querySelector("#multiplayer-join-button");
+		state.dom.publicJoin = root.querySelector("#multiplayer-public-join");
 		state.dom.ready = root.querySelector("#multiplayer-ready");
 		state.dom.startRace = root.querySelector("#multiplayer-start-race");
 		state.dom.rematch = root.querySelector("#multiplayer-rematch");
@@ -1300,6 +1449,7 @@
 		state.dom.resultsRematch = root.querySelector("#multiplayer-results-rematch");
 		state.dom.peerCount = root.querySelector("#multiplayer-peer-count");
 		state.dom.playerName.value = state.playerName;
+		state.dom.relayUrl.value = state.relayUrl;
 
 		state.dom.toggle.addEventListener("click", () => {
 			state.panelOpen = !state.panelOpen;
@@ -1311,8 +1461,14 @@
 		state.dom.startHost.addEventListener("click", () => {
 			startHost();
 		});
+		state.dom.publicHost.addEventListener("click", () => {
+			startPublicRoom();
+		});
 		state.dom.join.addEventListener("click", () => {
 			join();
+		});
+		state.dom.publicJoin.addEventListener("click", () => {
+			joinPublicRoom();
 		});
 		state.dom.ready.addEventListener("click", () => {
 			savePlayerName();
